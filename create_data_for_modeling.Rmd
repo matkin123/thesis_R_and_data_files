@@ -1,0 +1,75 @@
+---
+title: "finalize_model_data"
+output: html_document
+date: "2022-08-12"
+---
+
+# join land use data into master dataset (census rides) 
+```{r}
+# covert land use into df and take essential columns 
+land_use_manhattan_df = as.data.frame(land_use_manhattan) %>% select(LocationID, pct_res, pct_com, pct_other)
+
+census_rides = census_rides %>% left_join(land_use_manhattan_df, by = c("locationID" = "LocationID"))
+
+# add treatment varaible
+census_rides['Treatment'] = ifelse(census_rides$locationID %in% c(75, 262, 263, 140, 141, 236, 237), 1, 0)
+```
+
+```{r}
+# drop geometry bc it is a list
+model_data = census_rides %>% select(-geometry) # only keep complete cases that can be modelled
+
+model_data$pre_post = ifelse(model_data$month > '2016-12-31' & model_data$month < "2017-12-31", 1, 0)
+
+# just to check
+#model_data %>% filter(locationID %in% c(75, 262, 263, 140, 141, 236, 237)) %>% filter(month > '2015-12-31' & month < "2016-12-31") %>% select(Treatment)
+# 
+#model_data %>% filter(locationID %in% c(75, 262, 263, 140, 141, 236, 237)) %>% filter(month > '2016-12-31' & month < "2017-12-31") %>% select(Treatment)
+
+# convert popiulation and income to thousands
+model_data$populationE = model_data$populationE/1000
+model_data$median_incomeE = model_data$median_incomeE/1000
+
+# convert all percentages 
+model_data$pct_zero_vehicle = 100*model_data$pct_zero_vehicle
+model_data$pct_owner_occ = 100*model_data$pct_owner_occ
+model_data$pct_bachelors = 100*model_data$pct_bachelors
+model_data$white_pct = 100*model_data$white_pct
+model_data$black_pct = 100*model_data$black_pct
+model_data$latino_pct = 100*model_data$latino_pct
+model_data$native_pct = 100*model_data$native_pct
+model_data$asian_pct = 100*model_data$asian_pct
+model_data$pct_res = 100*model_data$pct_res
+model_data$pct_com = 100*model_data$pct_com
+model_data$pct_other = 100*model_data$pct_other
+
+model_data = model_data[complete.cases(model_data), ]
+```
+
+get the geometry for this 57 locationID dataframe. save as shpefile so i can import into geoda and create weights matrix, then pipe back in to put into pcdtest, and hopefully, the models. 
+```{r}
+census_rides = census_rides[rownames(census_rides) %in% row.names(model_data), ]
+
+length(unique(census_rides$locationID))
+new_df_for_shp = census_rides %>% group_by(locationID) %>% slice(1)
+length(unique(new_df_for_shp$locationID))
+```
+
+# read in weights
+```{r}
+tz_weights = read.gal("wts.gal", region.id = new_df_for_shp$locationID)
+tz_listw = nb2listw(tz_weights, zero.policy = TRUE, style = "W")
+tz_mat = nb2mat(tz_weights, zero.policy = T)
+
+print.listw(tz_listw, zero.policy=TRUE)
+class(tz_listw)
+names(tz_listw)
+tz_listw$neighbours[1:3]
+tz_listw$weights[1:3]
+
+attributes(tz_listw)$region.id
+tz_mat
+
+attributes(tz_listw)$region.id
+```
+

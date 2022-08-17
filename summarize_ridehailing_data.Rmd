@@ -1,0 +1,255 @@
+---
+title: "combined_dataset"
+output: html_document
+date: '2022-06-08'
+---
+
+```{r}
+library(tidycensus)
+library(tidyverse)
+library(tigris)
+library(sf)
+library(units)
+library(dplyr)
+library(rgdal)
+library(ggmap)
+library(readr)
+library(data.table)
+library(OpenStreetMap)
+library(tmap)# load tmap package (see Section IV) 
+library(sf)
+library(lubridate)
+library(tidyr)
+library(crsuggest)
+library(patchwork)
+library(spatialreg)
+library(ggpubr)
+library(broom)
+library(car)
+```
+
+```{r}
+data2016 = read.csv("2016sum.csv")
+data2017 = read.csv("2017sum.csv")
+
+# combined dataset
+full_data = rbind(data2016, data2017)
+full_data$month = ymd(full_data$month) # this is the conversion
+full_data = full_data %>% filter(locationID > 0)
+
+full_data = subset(full_data, select = -MoM_change)
+
+# full_data = full_data %>% drop_na(month) # some data were not assigned dates correctly. the number of obs are negligible 
+
+full_data = full_data %>% group_by(locationID) %>% 
+  mutate(MoM_change = (observations/lag(observations) - 1) * 100)  %>% 
+  ungroup() # something has goen seriously wrong with lag()
+
+full_data$MoM_change[is.na(full_data$MoM_change)] <- 0
+
+full_data = full_data %>% filter(month != ymd("2017-12-01")) # drop december bc reporting issues
+
+full_data = full_data %>% filter(observations > 500)
+```
+
+# create treatment group 
+```{r}
+treatment_group = full_data %>% filter(locationID %in% c(75, 262, 263, 140, 141, 236, 237)) #236, 237))
+```
+
+# Plot treatment group growth rate and observations
+```{r}
+# rename neighborhoods for chart
+treatment_group$locationID[treatment_group$locationID == 236] <- "Upper East Side North"
+treatment_group$locationID[treatment_group$locationID == 237] <- "Upper East Side South"
+treatment_group$locationID[treatment_group$locationID == 75] <- "East Harlem South"
+treatment_group$locationID[treatment_group$locationID == 140] <- "Lenox Hill East"
+treatment_group$locationID[treatment_group$locationID == 141] <- "Lenox Hill West"
+treatment_group$locationID[treatment_group$locationID == 262] <- "Yorkville East"
+treatment_group$locationID[treatment_group$locationID == 263] <- "Yorkville West"
+
+treatment_group$locationID = as.factor(treatment_group$locationID)
+
+# GROWTH RATE
+p <- ggplot(treatment_group, 
+            aes(x = month, y = MoM_change, group = locationID, color = locationID))
+p + geom_line() + scale_x_date(date_labels = "%b %y") + theme_classic()
+
+# Rides
+p <- ggplot(treatment_group, 
+            aes(x = month, y = observations, group = locationID, color = locationID))
+p = p + geom_line() + scale_x_date(date_labels = "%b %y")+ theme_classic()
+p = p + annotate("text", x = as.Date("2017-01-01"), y = 200000, label="Second Avenue Subway launches",hjust= 1.05, colour = "rosybrown", size = 3.5)
+p = p + geom_vline(xintercept = as.Date("2017-01-01", tz = "America/New_York"), linetype="dashed", color = "rosybrown", size=.5) 
+p = p + ggtitle("Monthly Ridehailing Trips by Treatment Neighborhood", subtitle = "2016 to 2018") + 
+                    theme(legend.title=element_blank(),
+              axis.title.x = element_blank(),
+              plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2))
+p = p + ylab("Monthly rides")
+p
+
+treatment_group$neighborhood = "a"
+
+treatment_group$locationID = as.numeric(treatment_group$locationID)
+```
+# make control group - citywide
+```{r}
+treatment_group = full_data %>% filter(locationID %in% c(75, 262, 263, 140, 141, 236, 237)) # revert neighborhood changes above
+
+control_group <- full_data[!(full_data$locationID==75 | full_data$locationID==262 | full_data$locationID==263 | full_data$locationID==140 | full_data$locationID==141 | full_data$locationID==236 | full_data$locationID==237) , ]
+
+control_group$locationID = as.factor(control_group$locationID)
+```
+
+# Combine all treatment versus control - citywide
+```{r}
+grouped_treatment = treatment_group %>% group_by(month) %>% summarise(rides = sum(observations)/7 ,
+                                                                      MoM_change = sum(MoM_change)/7) 
+
+# unique(treatment_group$locationID) 7 levels. divide by 7
+
+grouped_treatment$group = "t"
+
+grouped_control = control_group %>% group_by(month) %>% summarise(rides = sum(observations)/250,
+                                                                  MoM_change = sum(MoM_change)/250) 
+
+# unique(treatment_group$locationID) 250 levels. divide by 250
+
+grouped_control$group = "c"
+
+grouped_full = rbind(grouped_treatment, grouped_control)
+```
+
+# plot treatment vs control - citywide
+```{r}
+# GROWTH RATE
+p <- ggplot(grouped_full, 
+            aes(x = month, y = MoM_change, group = group, color = group))
+p + geom_line() + scale_x_date(date_labels = "%b %y") + theme_classic()
+
+# RIDES
+p <- ggplot(grouped_full, 
+            aes(x = month, y = rides, group = group, color = group))
+p + geom_line() + scale_x_date(date_labels = "%b %y") + theme_classic()
+```
+# make control group - Manhttan
+```{r}
+# merge with TZ file to isolate Manhattan taxi zones 
+tz = read.csv("tz.csv")
+tz = subset(tz, select = -service_zone)
+colnames(tz)[which(names(tz) == "LocationID")] <- "locationID" 
+tz$locationID = as.factor(tz$locationID)
+
+control_group = merge(tz, control_group, by = "locationID")
+control_group
+
+control_group_manhattan = control_group %>% filter(Borough == "Manhattan")
+
+# Summarize manhttan control 
+grouped_control_MH = control_group_manhattan %>% group_by(month) %>% summarise(rides = sum(observations)/59,
+                                                                  MoM_change = sum(MoM_change)/59)
+
+grouped_control_MH$group = "c"
+
+grouped_full_MH_control = rbind(grouped_treatment, grouped_control_MH)
+
+# treatment group stays the same as above (citywide) so no need to remake it here
+```
+
+# Plot treatment vs control - Manhattan
+```{r}
+# GROWTH RATE
+p <- ggplot(grouped_full_MH_control, 
+            aes(x = month, y = MoM_change, group = group, color = group))
+p = p + geom_line() + scale_x_date(date_labels = "%b %y")+ scale_color_manual(values=c("grey", "blue"), labels=c("Control group", "Treatment group")) + theme_classic()
+p = p + geom_vline(xintercept = as.Date("2017-01-01", tz = "America/New_York"), linetype="dashed", color = "rosybrown", size=.5) 
+p = p + annotate("text", x = as.Date("2017-01-01"), y = 30, label="Second Avenue Subway launches",hjust= 1.05, colour = "rosybrown", size = 3.5)
+p = p + ggtitle("MoM Growth Rate in Ridehailing Trips by Group", subtitle = "2016 to 2018") + 
+                    theme(legend.title=element_blank(),
+              axis.title.x = element_blank(),
+              plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2))
+p = p + ylab("MoM % change")
+p = p + geom_hline(yintercept = 0, colour = "lightgrey", size = .1)
+p
+
+# Rides
+p <- ggplot(grouped_full_MH_control, 
+            aes(x = month, y = rides, group = group, color = group)) 
+p = p + geom_line() + scale_x_date(date_labels = "%b %y") + scale_color_manual(values=c("grey", "blue"), labels=c("Control group", "Treatment group")) + theme_classic()
+p = p + geom_vline(xintercept = as.Date("2017-01-01", tz = "America/New_York"), linetype="dashed", color = "rosybrown", size=.5) 
+p = p + annotate("text", x = as.Date("2017-01-01"), y = 150000, label="Second Avenue Subway launches",hjust= 1.05, colour = "rosybrown", size = 3.5)
+p = p + ggtitle("Monthly Average Ridehailing Trips by Group", subtitle = "2016 to 2018") + 
+                    theme(legend.title=element_blank(),
+              axis.title.x = element_blank(),
+              plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2))
+p = p + ylab("Monthly average rides")
+p
+```
+# Calcualte DiD
+```{r}
+# difference treated = Treated region after - treated region before
+
+# difference control = control region after - control region before
+
+# difference in difference = difference treated - difference control
+```
+
+# DiD for MoM ride changes 
+```{r}
+# caluclate: avg MoM change when year == 2017 - avg MoM change when year == 2016
+
+## Difference treated
+grouped_full_MH_control$month = as.Date(grouped_full_MH_control$month)
+treated_2016_df = grouped_full_MH_control %>% filter(group == "t") %>% filter(month > '2015-12-31' & month < "2016-12-31")
+avg_MoM_change_2016_t = sum(treated_2016_df$MoM_change) / 12
+
+treated_2017_df = grouped_full_MH_control %>% filter(group == "t") %>% filter(month > '2016-12-31' & month < "2017-12-31")
+avg_MoM_change_2017_t = sum(treated_2017_df$MoM_change) / 11
+
+difference_treated = avg_MoM_change_2017_t - avg_MoM_change_2016_t
+
+## Difference control
+control_2016_df = grouped_full_MH_control %>% filter(group == "c") %>% filter(month > '2015-12-31' & month < "2016-12-31")
+avg_MoM_change_2016_c = sum(control_2016_df$MoM_change) / 12
+
+control_2017_df = grouped_full_MH_control %>% filter(group == "c") %>% filter(month > '2016-12-31' & month < "2017-12-31")
+avg_MoM_change_2017_c = sum(control_2017_df$MoM_change) / 11
+
+difference_control = avg_MoM_change_2017_c - avg_MoM_change_2016_c
+
+## Difference in differences - unit is average MoM change in rides 
+difference_treated - difference_control
+
+# Difference in differences - net rides
+treatment_group %>% group_by(month) %>% summarise(rides = sum(observations)) %>% mutate(one_pct = .01051*rides) %>% summarise(total_one_pct = sum(one_pct))
+```
+
+# DiD for 9 months rides
+```{r}
+## Difference treated
+x = grouped_full_MH_control %>% filter(month != ymd("2017-11-01")) %>% filter(month != ymd("2017-10-01")) # October/November
+
+x$month = as.Date(x$month)
+treated_2016_df = x %>% filter(group == "t") %>% filter(month > '2015-12-31' & month < "2016-12-31")
+avg_MoM_change_2016_t = sum(treated_2016_df$MoM_change) / 12
+
+treated_2017_df = x %>% filter(group == "t") %>% filter(month > '2016-12-31' & month < "2017-12-31")
+avg_MoM_change_2017_t = sum(treated_2017_df$MoM_change) / 11
+
+difference_treated = avg_MoM_change_2017_t - avg_MoM_change_2016_t
+
+## Difference control
+control_2016_df = x %>% filter(group == "c") %>% filter(month > '2015-12-31' & month < "2016-12-31")
+avg_MoM_change_2016_c = sum(control_2016_df$MoM_change) / 12
+
+control_2017_df = x %>% filter(group == "c") %>% filter(month > '2016-12-31' & month < "2017-12-31")
+avg_MoM_change_2017_c = sum(control_2017_df$MoM_change) / 11
+
+difference_control = avg_MoM_change_2017_c - avg_MoM_change_2016_c
+
+## Difference in differences - unit is average MoM change in rides 
+difference_treated - difference_control
+
+# Difference in differences - net rides
+treatment_group %>% filter(month != ymd("2017-11-01")) %>% filter(month != ymd("2017-10-01")) %>% group_by(month) %>% summarise(rides = sum(observations)) %>% mutate(one_pct = .01892*rides) %>% summarise(total_one_pct = sum(one_pct))
+```

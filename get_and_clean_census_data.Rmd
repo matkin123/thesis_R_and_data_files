@@ -1,0 +1,153 @@
+---
+title: "census_data_load_weighting"
+output: html_document
+date: '2022-06-20'
+---
+
+# 2016 ACS 
+```{r}
+variables_to_get <- c(
+  population = "B01003_001",
+  median_income = "B19013_001",
+  zero_vehicle_count = "B08201_002", 
+  total_hh_vehicle = "B08201_001",
+  owner_occ_hh = "B08137_002",
+  total_hh_occ = "B08137_001", 
+  med_gross_rent = "B25031_001", 
+  median_age = "B01002_001",
+  bachelors = "B15003_022",
+  white = "B02001_002",
+  black = "B02001_003",
+  native = "B02001_004",
+  asian = "B02001_005",
+  pi = "B02001_006",
+  latino = "B03003_003"
+)
+
+# 2016 5yrs ACS
+nyc_acs <- get_acs(
+  geography = "tract",
+  variables = variables_to_get,
+  state = "NY",
+  county = "New York",
+  survey = "acs5",
+  key = , # need to add your own
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+```
+```{r}
+# get rid of margin of error columns
+nyc_acs = nyc_acs %>% select(!ends_with("M"))
+```
+
+# Read in taxi zones for population interpolation
+```{r}
+# read in TZs
+tz_shp <- readOGR(dsn = "../documents/taxi_zones", layer = "taxi_zones")
+tz_shp = subset(tz_shp, borough == "Manhattan")
+tz_shp <- spTransform(tz_shp, CRS("+init=epsg:4269 +proj=longlat +ellps=GRS80 +datum=NAD83
++no_defs +towgs84=0,0,0"))
+tz_shp = st_as_sf(tz_shp) # convert to special features 
+```
+
+# use census blocks - more granular than tracts - for population aggregation to allocate influence to TZs
+```{r}
+st_crs(tz_shp)
+st_crs(nyc_acs)
+
+nyc_blocks <- blocks(
+  state = "NY",
+  county = "New York",
+  year = 2016
+)
+
+# 2016 5yrs ACS
+pop_2016_acs <- get_acs(
+  geography = "block group",
+  variables = c(population = "B01003_001"),
+  state = "NY",
+  county = "New York",
+  survey = "acs5",
+  key = "",
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+
+st_point_on_surface(pop_2016_acs)
+
+class(pop_2016_acs$populationE)
+
+pop_2016_acs = pop_2016_acs[!st_is_empty(pop_2016_acs),,drop=FALSE]
+pop_2016_acs = as.data.frame(pop_2016_acs)
+pop_2016_acs = pop_2016_acs %>% select(GEOID, populationE, geometry)
+
+colnames(pop_2016_acs)[which(names(pop_2016_acs) == "populationE")] <- "pop16"
+
+pop_2016_acs = st_as_sf(pop_2016_acs)
+```
+
+# population interpolation demographics
+```{r}
+sums_df = nyc_acs %>% select(-c(median_incomeE, med_gross_rentE, median_ageE))
+
+# sums
+interp_sums = interpolate_pw(
+  sums_df,
+  tz_shp,
+  to_id = "LocationID",
+  extensive = TRUE, 
+  weights = pop_2016_acs,
+  weight_column = "pop16"
+)
+
+averages_df = nyc_acs %>% select(median_incomeE, med_gross_rentE, median_ageE)
+
+# averages
+interp_avgs = interpolate_pw(
+  averages_df,
+  tz_shp,
+  to_id = "LocationID",
+  extensive = F, 
+  weights = pop_2016_acs,
+  weight_column = "pop16"
+)
+```
+
+
+# Merge the two sf dataframes, one with sum interpolation and one with avgs
+```{r}
+# convert to dfs to get rid of geometry in one of the objects and merge based on locationid
+interp_avgs_df = as.data.frame(interp_avgs)
+interp_avgs_df = interp_avgs_df %>% select(-geometry)
+
+interp_sums_df = as.data.frame(interp_sums)
+
+pop_interp = merge(interp_sums_df, interp_avgs_df, by = "LocationID")
+pop_interp = st_as_sf(pop_interp)
+```
+
+# create pct owner occ, pct college, pop_density AFTER getting sums based on population interpolated to the TZ level
+```{r}
+pop_interp = pop_interp %>% mutate(pct_zero_vehicle = zero_vehicle_countE/total_hh_vehicleE,
+                   pct_owner_occ = owner_occ_hhE/total_hh_occE,
+                   pct_bachelors = (bachelorsE) / populationE,
+                   pop_density = as.numeric(set_units(populationE / st_area(.), "1/km2")),
+                   white_pct = whiteE/populationE,
+                   black_pct = blackE/populationE,
+                   native_pct = nativeE/populationE,
+                   asian_pct = asianE/populationE,
+                   latino_pct = latinoE/populationE)
+```
+
+# merge census data with rides, and get rid of census counts bc we created percentages (e.g., pct zero vehicle) above
+```{r}
+census_rides <- merge(full_data, pop_interp, by.x = "locationID", by.y = "LocationID")
+
+census_rides %>% filter(locationID %in% c(75, 262, 263, 140, 141, 236, 237)) %>% arrange(month)
+
+census_rides = census_rides %>% select(-c(zero_vehicle_countE, total_hh_vehicleE, owner_occ_hhE, total_hh_occE, bachelorsE, whiteE, blackE, nativeE, asianE, piE, latinoE))
+```
+

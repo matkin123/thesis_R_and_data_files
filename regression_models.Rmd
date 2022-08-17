@@ -1,0 +1,162 @@
+---
+title: "regression_model"
+output: html_document
+date: '2022-06-20'
+---
+
+```{r}
+library(spdep)
+library(plm)
+library(lmtest)
+library(splm)
+library(finalfit)
+library(dplyr)
+library(jtools) 
+```
+# ensure model data is in correct order for panel regression
+```{r}
+model_data = model_data[order(model_data$locationID, model_data$month), ]
+```
+
+# OLS model
+```{r}
+OLS_formula <- "observations ~ populationE + pop_density + median_incomeE + med_gross_rentE + median_ageE + pct_bachelors + pct_zero_vehicle + pct_owner_occ + black_pct + latino_pct + asian_pct + pct_com + pct_other + Treatment:pre_post"
+OLS_model <- lm(formula = OLS_formula, data = model_data, na.action=na.exclude)
+summary(OLS_model)
+```
+
+# look for colinearity - over 5 indicates problematic 
+```{r}
+vif(OLS_model)
+```
+
+
+```{r}
+OLS_formula2 <- "observations ~ populationE + pop_density + median_incomeE + median_ageE + pct_bachelors + pct_zero_vehicle + pct_owner_occ + black_pct + latino_pct + asian_pct + pct_com + pct_other + Treatment:pre_post"
+OLS_model2 <- lm(formula = OLS_formula2, data = model_data, na.action=na.exclude)
+summary(OLS_model2)
+```
+
+# check colineairty 
+```{r}
+vif(OLS_model2)
+
+# correlations 
+cor(model_data$pct_bachelors, model_data$median_incomeE)
+
+cor(model_data$populationE, model_data$pop_density)
+
+cor(model_data$median_incomeE, model_data$pct_owner_occ) # remove pct_owner_occ becuase of colinearity with income 
+
+cor(model_data$latino_pct, model_data$black_pct) # KEEP even though high correlation becuase
+```
+
+# Final OLS model 
+
+```{r}
+OLS_formula3 <- "observations ~ populationE + median_incomeE + median_ageE + pct_zero_vehicle + black_pct + latino_pct + asian_pct + pct_com + pct_other + Treatment:pre_post"
+OLS_model3 <- lm(formula = OLS_formula3, data = model_data, na.action=na.exclude)
+summary(OLS_model3)
+vif(OLS_model3)
+```
+
+# Fixed effects approach #1: Add a dummy var for each T and each TZ by using factor. 
+```{r}
+dummy_formula <- "observations ~ populationE + median_incomeE + median_ageE + pct_zero_vehicle + black_pct + latino_pct + asian_pct + pct_com + pct_other + Treatment:pre_post + factor(month) + factor(locationID)-1"
+dummy_model <- lm(formula = dummy_formula, data = model_data, na.action = na.omit)
+summary(dummy_model)
+```
+
+# Fixed effects approach #2: within estimator
+
+gets rid of the terms for each state, and therefore intercepts for each state. Uses plm, or panel linear model.
+
+```{r}
+# WE_formula <- "observations ~ populationE + median_incomeE + median_ageE + pct_bachelors + pct_zero_vehicle + pct_owner_occ + black_pct + pct_res + pct_other + Treatment:pre_post"
+
+# two-way
+# WE_model = plm(WE_formula,
+#                data = model_data,
+#                index = c("locationID", "month"),
+#                model = "within",
+#                effect = "twoways")
+# summary(WE_model)
+
+
+WE_formula <- "observations ~ populationE + median_incomeE + median_ageE + pct_bachelors + pct_zero_vehicle + pct_owner_occ + black_pct + pct_res + pct_other + Treatment:pre_post + factor(month)"
+
+WE_model = plm(WE_formula,
+               data = model_data,
+               index = "locationID",
+               model = "within")
+summary(WE_model)
+```
+
+# F test to check whether the presence of fixed effects improves the model. ie, F test for additional effects on top of OLS
+```{r}
+pFtest(WE_model, OLS_model) 
+```
+
+# check for normal distribution of errors 
+```{r}
+p = ggplot(as.data.frame(residuals(WE_model)), aes(x = residuals(WE_model))) + 
+  geom_histogram(bins = 100, alpha = 0.5, color = "navy",
+                 fill = "navy") + xlab("Error") + ylab("Count")
+p = p + ggtitle("Within-Estimator Model Residuals") + 
+                    theme(plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2)) + theme_minimal()
+p
+```
+
+Two assumptions:
+Normal distribution - good. Errors are not biased towards one side. 
+Independence of observations - let's check. 
+
+# CD and RW tests
+```{r}
+model_data$residuals <- residuals(WE_model)
+
+pcdtest((pdata.frame(model_data))$observations, index = c("month"), w = tz_mat)
+pcdtest((pdata.frame(model_data))$residuals, index = c("month"), w = tz_mat)
+
+rwtest((pdata.frame(model_data))$observations, w = tz_mat, replications = 999)
+rwtest((pdata.frame(model_data))$residuals, w = tz_mat, replications = 999)
+```
+
+# SE models
+```{r}
+# with all of the terms included, I get the error: Error in solve.default(t(X) %*% sigma.1 %*% X, t(X) %*% sigma.1 %*% y) : system is computationally singular. This indicates a problem with multicollinearity. 
+
+SEM_data <- pdata.frame(model_data, index = c("locationID")) 
+
+SEM_fe_formula = "observations ~ locationID + factor(month) + Treatment:pre_post"
+  
+SEM_fe <- spreml(SEM_fe_formula, data = SEM_data, w = tz_listw,
+lag = FALSE, errors = "sem")
+summary(SEM_fe, digits = 2)
+
+# With neighborhood fixed effects, I cannot add any varaible besides the DiD term. So this is a weaker model than the one that only controls for time FEs, whcih we know are significant. Forget this model. 
+
+SEM_tz_fe_formula = "observations ~ locationID + Treatment:pre_post"
+
+SEM_tz_fe <- spreml(SEM_tz_fe_formula, data = SEM_data, w = tz_listw,
+lag = FALSE, errors = "sem")
+summary(SEM_tz_fe)
+
+# With time fixed effects, I can add all of the EVs.
+
+SEM_month_fe_formula = "observations ~ factor(month) + populationE + median_incomeE + median_ageE + pct_bachelors + pct_zero_vehicle + pct_owner_occ + black_pct + pct_com + pct_other + Treatment:pre_post"
+
+SEM_month_fe <- spreml(SEM_month_fe_formula, data = SEM_data, w = tz_listw,
+lag = FALSE, errors = "sem")
+summary(SEM_month_fe)
+```
+
+# SEM model 3 residuals 
+```{r}
+p = ggplot(as.data.frame(residuals(SEM_month_fe)), aes(x = residuals(SEM_month_fe))) + 
+  geom_histogram(bins = 100, alpha = 0.5, color = "navy",
+                 fill = "navy") + xlab("Error") + ylab("Count")
+p = p + ggtitle("Spatial Error Model (With Time Fixed Effects) Residuals") + 
+                    theme(plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2)) + theme_minimal()
+p
+```

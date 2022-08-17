@@ -1,0 +1,67 @@
+---
+title: "pluto_data"
+output: html_document
+date: '2022-07-21'
+---
+
+# pluto16v2 data aggregated to census tract (land use type for Manhattan census tracts)
+```{r}
+pluto = read.csv("MN.csv") # https://www1.nyc.gov/site/planning/data-maps/open-data/bytes-archive.page?sorts[year]=0&queries[search]=2016&page=3&offset=40
+
+# x[(x[,5] > x[,2] & x[,5] > x[,3]), ] # check to see whether Com or Res area is ever bigger. Only twice in 42k rows
+
+pluto = pluto %>% select(CT2010, LandUse, LotArea, BldgArea, ComArea, ResArea) %>% mutate(largest_area = ifelse(BldgArea > LotArea, BldgArea, LotArea)) # take the largest area, whether that's the area of the tax lot or all floors of building to adequately account of the usable space in the CT
+
+pluto_summary = pluto %>% group_by(CT2010) %>% summarise(total_area = sum(largest_area),
+                                         total_res = sum(ResArea),
+                                         total_com = sum(ComArea))
+
+pluto_summary$pct_res = pluto_summary$total_res / pluto_summary$total_area
+pluto_summary$pct_com = pluto_summary$total_com / pluto_summary$total_area
+pluto_summary$pct_other = (pluto_summary$total_area - (pluto_summary$total_com + pluto_summary$total_res)) / pluto_summary$total_area # other is transportation/utility, public land, parks, vacant land
+
+summary(pluto_summary) # mean res is 58%, mean com is 32%, mean other is .09%
+```
+###  aggregate land use from the CT to the TZ level
+
+# first get the 2010 census boundairies and combine them with the PLUTO data (for interpolation later)
+
+```{r}
+ct_2010_shp <- readOGR(dsn = "../Documents/ct2010", layer = "geo_export_f07083f4-495c-4bb4-8cfe-1bcb6a815d34")
+
+#st_crs(ct_2010_shp) = # trying to set crs of sf object...
+
+ct_2010_shp <- spTransform(ct_2010_shp, CRS("+init=epsg:4269 +proj=longlat +ellps=GRS80 +datum=NAD83write shp file 
++no_defs +towgs84=0,0,0"))
+
+ct_as_df = st_as_sf(ct_2010_shp)
+
+ct_as_df = as.data.frame(ct_as_df) %>% select(ctlabel, geometry)
+
+ct_as_df$ctlabel = as.numeric(ct_as_df$ctlabel)
+
+ct_as_df = ct_as_df[!duplicated(ct_as_df$ctlabel), ] 
+
+land_use_w_geom = st_as_sf(left_join(pluto_summary, ct_as_df, by = c("CT2010" = "ctlabel")))
+rownames(land_use_w_geom)
+
+land_use_w_geom = land_use_w_geom %>% select(pct_res, pct_com, pct_other, geometry) # select only the averages for interpolation
+```
+
+# then interpolate - that is, aggregate land use percentages from CT to TZ scale by area
+```{r}
+# interpolate - i.e., use the land use percentages from each CT and aggregate (by area) to the TZ scale. 
+land_use_interpolate <- st_interpolate_aw(
+  land_use_w_geom,
+  tz_shp,
+  extensive = F # because we are interpolating percentages 
+)
+
+# the output above loses the geoID identifier of the TZ, so I rejoin with the TZ zones to add TZ identifiers to each row
+land_use_manhattan = st_join(tz_shp, land_use_interpolate, join = st_equals, left = T)
+```
+
+# Here's a breakdown of pct commerical/industrial. looks good. 
+```{r}
+qtm(land_use_manhattan, fill = "pct_res")
+```

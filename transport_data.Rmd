@@ -1,0 +1,139 @@
+---
+title: "transport_data"
+output: html_document
+date: "2022-08-17"
+---
+
+# Transport data (subway and bus stops per sq mile)
+```{r}
+# https://qri.cloud/nyc-transit-data/daily_counts_2016
+# https://qri.cloud/nyc-transit-data/daily_counts_2017
+MTA2016 = read.csv("MTA2016.csv")
+MTA2017 = read.csv("MTA2017.csv")
+
+# table(MTA2016$daytime_routes)
+```
+
+# summarize q train data
+```{r}
+q_train = MTA2017 %>% filter(daytime_routes == "Q") %>% filter(stop_name %in% c("72 St", "86 St", "96 St"))
+
+q_train$date = ymd(q_train$date, tz = "America/New_York") 
+
+q_train_summary = q_train %>% group_by(stop_name, month=floor_date(date, "month")) %>% summarise(entries = sum(entries),
+                                                                                                    exits = sum(exits))
+```
+
+# summarize Lexington Avenue (green line) data
+```{r}
+grren_line_2016 = MTA2016 %>% filter(daytime_routes %in% c("4 5 6", "6")) %>% filter(stop_name %in% c("96 St", "86 St", "77 St", "68 St - Hunter College"))
+
+grren_line_2017 = MTA2017 %>% filter(daytime_routes %in% c("4 5 6", "6")) %>% filter(stop_name %in% c("96 St", "86 St", "77 St", "68 St - Hunter College"))
+
+ncol(grren_line_2016)
+ncol(grren_line_2017)
+
+green_line = rbind(grren_line_2016, grren_line_2017)
+
+green_line$date = ymd(green_line$date, tz = "America/New_York") 
+
+green_line_summary = green_line %>% group_by(stop_name, month=floor_date(date, "month")) %>% summarise(entries = sum(entries),
+                                                                                                    exits = sum(exits))
+q_train_summary$line = "Second Avenue"
+green_line_summary$line = "Lexington Avenue"
+
+all_subway_summary = rbind(q_train_summary, green_line_summary) # i want to do nested colors 
+
+# individual charts for green/yellow lines
+p <- ggplot(green_line_summary, aes(x = month,
+                        y = entries, group = stop_name))
+p + geom_line(aes(color = stop_name)) +
+    scale_y_continuous(breaks=seq(0, 1800000, 600000), limits = c(0, 1800000)) +
+    theme_classic()
+
+p <- ggplot(green_line_summary, aes(x = month,
+                        y = exits, group = stop_name))
+p + geom_line(aes(color = stop_name)) +
+    scale_y_continuous(breaks=seq(0, 1800000, 600000), limits = c(0, 1800000)) +
+    theme_classic()
+
+# combined chart 
+all_subway_summary_grouped = all_subway_summary %>% group_by(line, month) %>% summarise(entries = sum(entries))
+
+
+total_rides = all_subway_summary_grouped %>% group_by(month) %>% summarise(entries = sum(entries)) 
+total_rides$line = "Total"
+
+all_subway_summary_grouped = rbind(all_subway_summary_grouped, total_rides)
+
+# get rid of total before 2017 b/c it looks bad. 
+all_subway_summary_grouped <- all_subway_summary_grouped[-c(37:47), ]
+  
+options(scipen=7)
+
+p <- ggplot(all_subway_summary_grouped, aes(x = as.Date(month),
+                        y = entries, color = line))
+p = p + geom_line(aes(color = line)) + scale_color_manual(values = c("darkgreen", "gold", "lightgrey"))
+p = p + ylab("station entries") +
+    scale_y_continuous(breaks=seq(0, 5000000, 1000000), limits = c(0, 5500000))
+p = p + scale_x_date(date_labels = "%b %y")
+p = p + theme_classic()
+p = p + geom_vline(xintercept = as.Date("2017-01-01", tz = "America/New_York"), linetype="dashed", color = "rosybrown", size=.5) 
+p = p + annotate("text", x = as.Date("2017-01-01"),y = 600000, label="Second Avenue Subway launches",hjust= -.025, colour = "rosybrown", size = 3.5)
+p = p + scale_fill_discrete(name="line",
+                         breaks=c("456", "Q", "Total"),
+                         labels=c("Lexington Avenue", "Second Avenue", "Total"))
+p = p + ggtitle("Monthly Subway Ridership on the Upper East Side and East Harlem", subtitle = "2016 to 2018") + theme(legend.title=element_blank(),
+  plot.title = element_text("Helvetica", "bold", "black", "12", vjust = 2),
+  axis.title.x = element_blank())  + scale_x_date(date_labels = "%b %y")
+p 
+```
+
+# Substitution effect
+```{r}
+### how much did total ridership increase on avg between 2016 and 2017
+
+# avg 2016
+all_subway_summary_grouped %>% filter(month > '2015-12-31' & month < "2016-12-31") %>% summarise(avg_2016 = sum(entries) / 12)
+# 4131286.8
+
+# avg 2017
+all_subway_summary_grouped %>% filter(month > '2016-12-31' & month < "2017-12-31") %>% summarise(avg_2017 = sum(entries) / 12)
+# 4749437
+
+# net increase of 618150.2 per month
+
+(618150.2*100) / 4131286.8
+
+### average q train ridership 2017
+
+all_subway_summary_grouped %>% filter(line == "Q") %>% summarise(avg_2017 = sum(entries) / 12)
+
+# 1812575
+
+### average 456 decline (i.e., average in 2016 - average in 2017)
+
+all_subway_summary_grouped %>% filter(line == "456") %>% filter(month > '2015-12-31' & month < "2016-12-31") %>% summarise(avg_2016 = sum(entries) / 12)
+
+all_subway_summary_grouped %>% filter(line == "456") %>% filter(month > '2016-12-31' & month < "2017-12-31") %>% summarise(avg_2017 = sum(entries) / 12)
+
+# 4131287 - 2936862 difference 
+
+# 1194425 average decline in monthly ridership 
+
+(1194425 * 100) / 1812575 # 65% if monthly q train ridership came from the 456 line
+```
+
+# Map of treatment vs control TZs
+```{r}
+tz_shp$treatment = ifelse( (tz_shp$LocationID==75 | tz_shp$LocationID==262 | tz_shp$LocationID==263 | tz_shp$LocationID==140 | tz_shp$LocationID==141 | tz_shp$LocationID==236 | tz_shp$LocationID==237), 1, 0)
+tz_shp$treatment = as.factor(tz_shp$treatment)
+
+ggplot(tz_shp, aes(fill = treatment)) + 
+  geom_sf(color = "white", lwd = 0.2) + 
+  scale_fill_manual(values = c("grey", "yellow"), labels = c("Control", "Treatment")) + 
+  theme_void()+
+  theme(legend.title=element_blank())
+
+tz_shp %>% filter(LocationID == 243)
+```
